@@ -1,3 +1,6 @@
 pytest
 langchain
 pydantic-settings
+kafka-python
+orjson
+uuid-utils

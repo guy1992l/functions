@@ -272,7 +272,6 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         self,
         monitoring_broker: str,
         monitoring_topic: str,
-        # TODO: Add more Kafka producer options if needed...
         model_endpoint_name: str,
         model_endpoint_uid: str,
         serving_function: str | RemoteRuntime,
@@ -280,11 +279,10 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         project: str | mlrun.projects.MlrunProject = None,
     ):
         """
-        Initialize an MLRun model endpoint monitoring client.
+        Initialize an MLRun model endpoint monitoring client for Kafka.
 
-        :param monitoring_broker: Kafka broker name.
-        :param monitoring_topic: Kafka topic name.
-        TODO: Add more Kafka producer options if needed...
+        :param monitoring_broker: Kafka broker address (e.g., "localhost:9092" or comma-separated list of brokers).
+        :param monitoring_topic: Kafka topic name to publish monitoring events.
         :param model_endpoint_name: The monitoring endpoint related model name.
         :param model_endpoint_uid: Model endpoint unique identifier.
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
@@ -301,15 +299,17 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
             project=project,
         )
 
-        import kafka
+        from kafka import KafkaProducer
 
         # Store the provided info:
         self._monitoring_broker = monitoring_broker
         self._monitoring_topic = monitoring_topic
 
         # Initialize a Kafka producer:
-        self._kafka_producer = kafka.KafkaProducer(
-            ...
+        self._kafka_producer = KafkaProducer(
+            bootstrap_servers=monitoring_broker,
+            key_serializer=lambda k: k.encode("utf-8") if isinstance(k, str) else k,
+            value_serializer=lambda v: v if isinstance(v, bytes) else orjson.dumps(v) if isinstance(v, dict) else str(v).encode("utf-8"),
         )
 
     def monitor(
@@ -344,7 +344,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         # Push to stream:
         self._kafka_producer.send(
             topic=self._monitoring_topic,
-            value=orjson.dumps(event),
+            value=event,  # Will be serialized by the value_serializer
             key=self._model_endpoint_uid,
         )
 
@@ -414,7 +414,7 @@ class MLRunTracerClientSettings(BaseSettings):
         """
         # Define the sets
         v3io_settings = all([self.v3io_container, self.v3io_stream_path])
-        kafka_settings = all([self.kafka_topic, self.kafka_broker])  # TODO: Add mandatory other kafka settings
+        kafka_settings = all([self.kafka_topic, self.kafka_broker])
 
         # Make sure only one set is provided:
         if v3io_settings and kafka_settings:
@@ -727,7 +727,8 @@ class MLRunTracer(BaseTracer):
         """
         if mlrun.mlconf.is_ce_mode():
             return _KafkaMLRunEndPointClient(
-                # TODO: Add more Kafka producer options if needed...
+                monitoring_broker=self._client_settings.kafka_broker,
+                monitoring_topic=self._client_settings.kafka_topic,
                 model_endpoint_name=self._client_settings.model_endpoint_name,
                 model_endpoint_uid=self._client_settings.model_endpoint_uid,
                 serving_function=self._client_settings.serving_function,
@@ -1144,7 +1145,8 @@ def setup_langchain_monitoring(
     model_endpoint_name: str = "langchain_mlrun_endpoint",
     v3io_container: str = "projects",
     v3io_stream_path: str = None,
-    # TODO: Add Kafka parameters when Kafka monitoring is supported.
+    kafka_broker: str = "kafka-stream:9092",
+    kafka_topic: str = None,
 ) -> dict:
     """
     Create a model endpoint in the given project to be used for LangChain monitoring with MLRun and returns the
@@ -1164,10 +1166,12 @@ def setup_langchain_monitoring(
     :param function_name: The name of the serving function to create.
     :param model_name: The name of the model to create.
     :param model_endpoint_name: The name of the model endpoint to create.
-    :param v3io_container: The V3IO container where the monitoring stream is located.
-    :param v3io_stream_path: The V3IO stream path for monitoring. If None,
+    :param v3io_container: The V3IO container where the monitoring stream is located (for MLRun Enterprise).
+    :param v3io_stream_path: The V3IO stream path for monitoring (for MLRun Enterprise). If None,
         ``<project.name>/model-endpoints/stream-v1`` will be used.
-    TODO: Add Kafka parameters when Kafka monitoring is supported.
+    :param kafka_broker: The Kafka broker address for MLRun CE (default: "kafka-stream:9092").
+    :param kafka_topic: The Kafka topic name for MLRun CE. If None,
+        ``langchain-monitoring-<project.name>`` will be used.
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
 
@@ -1396,11 +1400,12 @@ def handler(context, event):
 
     # Set parameters defaults:
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
-    # TODO: Support Kafka monitoring parameters defaults when Kafka monitoring is supported.
+    kafka_topic = kafka_topic or f"langchain-monitoring-{project.name}"
 
     if mlrun.mlconf.is_ce_mode():
         client_env_vars = {
-            "MLRUN_TRACER_CLIENT_KAFKA_...": ...
+            "MLRUN_TRACER_CLIENT_KAFKA_BROKER": kafka_broker,
+            "MLRUN_TRACER_CLIENT_KAFKA_TOPIC": kafka_topic,
         }
     else:
         client_env_vars = {
