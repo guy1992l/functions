@@ -71,7 +71,7 @@ class _MLRunEndPointClient(ABC):
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
 
-        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
+        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         # Store the provided info:
         self._model_endpoint_name = model_endpoint_name
@@ -166,7 +166,7 @@ class _MLRunEndPointClient(ABC):
         :param request_timestamp: Request/start timestamp in the format of '%Y-%m-%d %H:%M:%S%z'.
         :param response_timestamp: Response/end timestamp in the format of '%Y-%m-%d %H:%M:%S%z'.
 
-        :return: The event to send to the monitoring stream.
+        :returns: The event to send to the monitoring stream.
         """
         # Copy the sample:
         event = copy.deepcopy(self._event_sample)
@@ -207,7 +207,7 @@ class _V3IOMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
 
-        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
+        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -291,7 +291,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
 
-        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
+        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -410,7 +410,7 @@ class MLRunTracerClientSettings(BaseSettings):
         """
         Validate that either V3IO settings or Kafka settings are provided, but not both or none.
 
-        :return: The validated settings instance.
+        :returns: The validated settings instance.
         """
         # Define the sets
         v3io_settings = all([self.v3io_container, self.v3io_stream_path])
@@ -1069,9 +1069,9 @@ class MLRunTracer(BaseTracer):
 
         :returns: The imported object.
 
-        raise: ValueError: If ``module_path`` is not a valid Python module path.
-        raise: ImportError: If module cannot be imported.
-        raise: AttributeError: If the object name is not found in the module.
+        :raises ValueError: If ``module_path`` is not a valid Python module path.
+        :raises ImportError: If module cannot be imported.
+        :raises AttributeError: If the object name is not found in the module.
         """
         try:
             module_name, object_name = module_path.rsplit(".", 1)
@@ -1171,7 +1171,7 @@ def setup_langchain_monitoring(
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
 
-    raise: MLRunInvalidArgumentError: If no project is provided and there is no current active project.
+    :raises MLRunInvalidArgumentError: If no project is provided and there is no current active project.
     """
     import io
     import time
