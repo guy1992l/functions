@@ -70,8 +70,6 @@ class _MLRunEndPointClient(ABC):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
-
-        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         # Store the provided info:
         self._model_endpoint_name = model_endpoint_name
@@ -206,8 +204,6 @@ class _V3IOMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
-
-        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -288,8 +284,6 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
-
-        :raises MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -347,6 +341,8 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
             value=event,  # Will be serialized by the value_serializer
             key=self._model_endpoint_uid,
         )
+        # Flush to ensure the message is actually sent (send() is async and buffers)
+        self._kafka_producer.flush()
 
 
 class MLRunTracerClientSettings(BaseSettings):
@@ -1069,10 +1065,6 @@ class MLRunTracer(BaseTracer):
         :param module_path: Full dotted path, e.g. ``a.b.module.object``.
 
         :returns: The imported object.
-
-        :raises ValueError: If ``module_path`` is not a valid Python module path.
-        :raises ImportError: If module cannot be imported.
-        :raises AttributeError: If the object name is not found in the module.
         """
         try:
             module_name, object_name = module_path.rsplit(".", 1)
@@ -1170,12 +1162,10 @@ def setup_langchain_monitoring(
     :param v3io_stream_path: The V3IO stream path for monitoring (for MLRun Enterprise). If None,
         ``<project.name>/model-endpoints/stream-v1`` will be used.
     :param kafka_broker: The Kafka broker address for MLRun CE (default: "kafka-stream:9092").
-    :param kafka_topic: The Kafka topic name for MLRun CE. If None,
-        ``langchain-monitoring-<project.name>`` will be used.
+    :param kafka_topic: The Kafka topic name for MLRun CE. If None, uses MLRun's standard
+        monitoring topic naming convention: ``monitoring_stream_{system_id}_{project}_{function}_v1``.
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
-
-    :raises MLRunInvalidArgumentError: If no project is provided and there is no current active project.
     """
     import io
     import time
@@ -1186,6 +1176,7 @@ def setup_langchain_monitoring(
     import json
 
     from mlrun.common.helpers import parse_versioned_object_uri
+    from mlrun.common.model_monitoring.helpers import get_kafka_topic
     from mlrun.features import Feature
 
     class ProgressStep:
@@ -1400,7 +1391,9 @@ def handler(context, event):
 
     # Set parameters defaults:
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
-    kafka_topic = kafka_topic or f"langchain-monitoring-{project.name}"
+    # Use MLRun's standard topic naming convention so events reach the monitoring infrastructure
+    # Pass None for function_name to get the main monitoring topic (without function suffix)
+    kafka_topic = kafka_topic or get_kafka_topic(project.name)
 
     if mlrun.mlconf.is_ce_mode():
         client_env_vars = {
