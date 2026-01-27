@@ -1137,6 +1137,36 @@ register_configure_hook(
 )
 
 
+def get_kafka_stream_profile_name(project: mlrun.projects.MlrunProject) -> str:
+    """
+    Auto-detect the Kafka stream profile name from the project's registered datastore profiles.
+
+    This function searches for registered ``DatastoreProfileKafkaStream`` profiles and returns the name
+    if exactly one is found. If multiple Kafka profiles exist, or none are found, a ValueError is raised.
+
+    :param project: The MLRun project to search for Kafka stream profiles.
+
+    :returns: The name of the detected Kafka stream profile.
+    """
+    kafka_profiles = [
+        p for p in project.list_datastore_profiles()
+        if getattr(p, 'type', None) == 'kafka_stream'
+    ]
+    if len(kafka_profiles) == 1:
+        return kafka_profiles[0].name
+    elif len(kafka_profiles) > 1:
+        profile_names = [p.name for p in kafka_profiles]
+        raise ValueError(
+            f"Multiple Kafka stream profiles found: {profile_names}. "
+            "Please specify stream_profile_name explicitly."
+        )
+    else:
+        raise ValueError(
+            "No Kafka stream profile found. "
+            "Register a DatastoreProfileKafkaStream or pass stream_profile_name explicitly."
+        )
+
+
 # Temporary convenient function to set up the monitoring infrastructure required for the tracer.
 def setup_langchain_monitoring(
     project: str | mlrun.MlrunProject = None,
@@ -1400,14 +1430,9 @@ def handler(context, event):
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
 
     if mlrun.mlconf.is_ce_mode():
-        # If stream_profile_name not provided, try to get it from model monitoring credentials
+        # If stream_profile_name not provided, try to auto-detect from registered profiles
         if stream_profile_name is None:
-            stream_profile_name = project.spec.model_monitoring_credentials.stream_profile_name
-        if stream_profile_name is None:
-            raise ValueError(
-                "stream_profile_name is required for MLRun CE mode. "
-                "Either pass it explicitly or configure it via project.set_model_monitoring_credentials()."
-            )
+            stream_profile_name = get_kafka_stream_profile_name(project)
         client_env_vars = {
             "MLRUN_TRACER_CLIENT_STREAM_PROFILE_NAME": stream_profile_name,
         }
