@@ -266,24 +266,24 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
 
     def __init__(
         self,
-        monitoring_broker: str,
-        monitoring_topic: str,
+        stream_profile_name: str,
+        project: str | mlrun.projects.MlrunProject,
         model_endpoint_name: str,
         model_endpoint_uid: str,
         serving_function: str | RemoteRuntime,
         serving_function_tag: str | None = None,
-        project: str | mlrun.projects.MlrunProject = None,
     ):
         """
         Initialize an MLRun model endpoint monitoring client for Kafka.
 
-        :param monitoring_broker: Kafka broker address (e.g., "localhost:9092" or comma-separated list of brokers).
-        :param monitoring_topic: Kafka topic name to publish monitoring events.
+        :param stream_profile_name: The name of the registered DatastoreProfileKafkaStream to use for Kafka
+            configuration. This profile should be registered via ``project.register_datastore_profile()`` and
+            contains all Kafka settings including broker, topic, SASL credentials, SSL config, etc.
+        :param project: Project name or ``MlrunProject``. Required to fetch the datastore profile.
         :param model_endpoint_name: The monitoring endpoint related model name.
         :param model_endpoint_uid: Model endpoint unique identifier.
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
-        :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -294,16 +294,35 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         )
 
         from kafka import KafkaProducer
+        from mlrun.datastore.utils import KafkaParameters
+        from mlrun.common.model_monitoring.helpers import get_kafka_topic
 
-        # Store the provided info:
-        self._monitoring_broker = monitoring_broker
-        self._monitoring_topic = monitoring_topic
+        # Get project object:
+        if isinstance(project, str):
+            project_obj = mlrun.get_or_create_project(project)
+        else:
+            project_obj = project
 
-        # Initialize a Kafka producer:
+        # Fetch the stream profile:
+        stream_profile = project_obj.get_datastore_profile(stream_profile_name)
+
+        # Get profile attributes and convert to producer config:
+        profile_attrs = stream_profile.attributes()
+        kafka_params = KafkaParameters(profile_attrs)
+        producer_config = kafka_params.producer()
+
+        # Extract broker and determine topic:
+        self._monitoring_broker = profile_attrs.get("brokers")
+        # Use profile's topic if available, otherwise use MLRun's standard naming:
+        topics = profile_attrs.get("topics", [])
+        self._monitoring_topic = topics[0] if topics else get_kafka_topic(project_obj.name)
+
+        # Initialize a Kafka producer with full config from profile:
         self._kafka_producer = KafkaProducer(
-            bootstrap_servers=monitoring_broker,
+            bootstrap_servers=self._monitoring_broker,
             key_serializer=lambda k: k.encode("utf-8") if isinstance(k, str) else k,
             value_serializer=lambda v: v if isinstance(v, bytes) else orjson.dumps(v) if isinstance(v, dict) else str(v).encode("utf-8"),
+            **{k: v for k, v in producer_config.items() if k not in ["bootstrap_servers"]}
         )
 
     def monitor(
@@ -361,17 +380,12 @@ class MLRunTracerClientSettings(BaseSettings):
     The V3IO stream container.
     """
 
-    kafka_broker: str | None = None
+    stream_profile_name: str | None = None
     """
-    The Kafka broker address.
+    The name of the registered DatastoreProfileKafkaStream to use for Kafka configuration.
+    This profile should be registered via ``project.register_datastore_profile()`` and contains
+    all Kafka settings including broker, topic, SASL credentials, SSL config, etc.
     """
-
-    kafka_topic: str | None = None
-    """
-    The Kafka topic name.
-    """
-
-    # TODO: Add more Kafka producer options if needed...
 
     model_endpoint_name: str = ...
     """
@@ -402,24 +416,19 @@ class MLRunTracerClientSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MLRUN_TRACER_CLIENT_")
 
     @model_validator(mode='after')
-    def check_exclusive_sets(self) -> 'MLRunTracerClientSettings':
+    def validate_stream_settings(self) -> 'MLRunTracerClientSettings':
         """
-        Validate that either V3IO settings or Kafka settings are provided, but not both or none.
+        Validate that either V3IO settings or stream profile name is provided, but not both or none.
 
         :returns: The validated settings instance.
         """
-        # Define the sets
         v3io_settings = all([self.v3io_container, self.v3io_stream_path])
-        kafka_settings = all([self.kafka_topic, self.kafka_broker])
+        kafka_settings = self.stream_profile_name is not None
 
-        # Make sure only one set is provided:
         if v3io_settings and kafka_settings:
-            raise ValueError("Provide either V3IO settings OR Kafka settings, not both.")
+            raise ValueError("Cannot provide both V3IO and Kafka stream profile settings")
         if not v3io_settings and not kafka_settings:
-            raise ValueError(
-                "You must provide either a complete V3IO settings or complete Kafka settings. See docs for more "
-                "information"
-            )
+            raise ValueError("Must provide either V3IO settings or stream_profile_name")
 
         return self
 
@@ -723,13 +732,12 @@ class MLRunTracer(BaseTracer):
         """
         if mlrun.mlconf.is_ce_mode():
             return _KafkaMLRunEndPointClient(
-                monitoring_broker=self._client_settings.kafka_broker,
-                monitoring_topic=self._client_settings.kafka_topic,
+                stream_profile_name=self._client_settings.stream_profile_name,
+                project=self._client_settings.project,
                 model_endpoint_name=self._client_settings.model_endpoint_name,
                 model_endpoint_uid=self._client_settings.model_endpoint_uid,
                 serving_function=self._client_settings.serving_function,
                 serving_function_tag=self._client_settings.serving_function_tag,
-                project=self._client_settings.project,
             )
         return _V3IOMLRunEndPointClient(
             monitoring_stream_path=self._client_settings.v3io_stream_path,
@@ -1137,8 +1145,7 @@ def setup_langchain_monitoring(
     model_endpoint_name: str = "langchain_mlrun_endpoint",
     v3io_container: str = "projects",
     v3io_stream_path: str = None,
-    kafka_broker: str = "kafka-stream:9092",
-    kafka_topic: str = None,
+    stream_profile_name: str = None,
 ) -> dict:
     """
     Create a model endpoint in the given project to be used for LangChain monitoring with MLRun and returns the
@@ -1161,9 +1168,11 @@ def setup_langchain_monitoring(
     :param v3io_container: The V3IO container where the monitoring stream is located (for MLRun Enterprise).
     :param v3io_stream_path: The V3IO stream path for monitoring (for MLRun Enterprise). If None,
         ``<project.name>/model-endpoints/stream-v1`` will be used.
-    :param kafka_broker: The Kafka broker address for MLRun CE (default: "kafka-stream:9092").
-    :param kafka_topic: The Kafka topic name for MLRun CE. If None, uses MLRun's standard
-        monitoring topic naming convention: ``monitoring_stream_{system_id}_{project}_{function}_v1``.
+    :param stream_profile_name: The name of the registered ``DatastoreProfileKafkaStream`` to use for Kafka
+        configuration (for MLRun CE). This profile should be registered via ``project.register_datastore_profile()``
+        and contains all Kafka settings including broker, topic, SASL credentials, SSL config, etc. If not provided,
+        the profile name will be retrieved from the project's model monitoring credentials (set via
+        ``project.set_model_monitoring_credentials(stream_profile_name=...)``).
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
     """
@@ -1175,8 +1184,6 @@ def setup_langchain_monitoring(
     import pickle
     import json
 
-    from mlrun.common.helpers import parse_versioned_object_uri
-    from mlrun.common.model_monitoring.helpers import get_kafka_topic
     from mlrun.features import Feature
 
     class ProgressStep:
@@ -1391,14 +1398,18 @@ def handler(context, event):
 
     # Set parameters defaults:
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
-    # Use MLRun's standard topic naming convention so events reach the monitoring infrastructure
-    # Pass None for function_name to get the main monitoring topic (without function suffix)
-    kafka_topic = kafka_topic or get_kafka_topic(project.name)
 
     if mlrun.mlconf.is_ce_mode():
+        # If stream_profile_name not provided, try to get it from model monitoring credentials
+        if stream_profile_name is None:
+            stream_profile_name = project.spec.model_monitoring_credentials.stream_profile_name
+        if stream_profile_name is None:
+            raise ValueError(
+                "stream_profile_name is required for MLRun CE mode. "
+                "Either pass it explicitly or configure it via project.set_model_monitoring_credentials()."
+            )
         client_env_vars = {
-            "MLRUN_TRACER_CLIENT_KAFKA_BROKER": kafka_broker,
-            "MLRUN_TRACER_CLIENT_KAFKA_TOPIC": kafka_topic,
+            "MLRUN_TRACER_CLIENT_STREAM_PROFILE_NAME": stream_profile_name,
         }
     else:
         client_env_vars = {
