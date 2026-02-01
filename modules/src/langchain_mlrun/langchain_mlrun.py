@@ -267,11 +267,11 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
     def __init__(
         self,
         stream_profile_name: str,
-        project: str | mlrun.projects.MlrunProject,
         model_endpoint_name: str,
         model_endpoint_uid: str,
         serving_function: str | RemoteRuntime,
         serving_function_tag: str | None = None,
+        project: str | mlrun.projects.MlrunProject = None,
     ):
         """
         Initialize an MLRun model endpoint monitoring client for Kafka.
@@ -279,11 +279,11 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         :param stream_profile_name: The name of the registered DatastoreProfileKafkaStream to use for Kafka
             configuration. This profile should be registered via ``project.register_datastore_profile()`` and
             contains all Kafka settings including broker, topic, SASL credentials, SSL config, etc.
-        :param project: Project name or ``MlrunProject``. Required to fetch the datastore profile.
         :param model_endpoint_name: The monitoring endpoint related model name.
         :param model_endpoint_uid: Model endpoint unique identifier.
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
+        :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -297,11 +297,8 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         from mlrun.datastore.utils import KafkaParameters
         from mlrun.common.model_monitoring.helpers import get_kafka_topic
 
-        # Get project object:
-        if isinstance(project, str):
-            project_obj = mlrun.get_or_create_project(project)
-        else:
-            project_obj = project
+        # Get project object using resolved project name from parent:
+        project_obj = mlrun.get_or_create_project(self._project_name)
 
         # Fetch the stream profile:
         stream_profile = project_obj.get_datastore_profile(stream_profile_name)
@@ -733,11 +730,11 @@ class MLRunTracer(BaseTracer):
         if mlrun.mlconf.is_ce_mode():
             return _KafkaMLRunEndPointClient(
                 stream_profile_name=self._client_settings.stream_profile_name,
-                project=self._client_settings.project,
                 model_endpoint_name=self._client_settings.model_endpoint_name,
                 model_endpoint_uid=self._client_settings.model_endpoint_uid,
                 serving_function=self._client_settings.serving_function,
                 serving_function_tag=self._client_settings.serving_function_tag,
+                project=self._client_settings.project,
             )
         return _V3IOMLRunEndPointClient(
             monitoring_stream_path=self._client_settings.v3io_stream_path,
