@@ -1,7 +1,3 @@
 pytest
 langchain
 pydantic-settings
-kafka-python
-orjson
-uuid-utils
-s3fs<=2025.7.0
