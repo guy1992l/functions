@@ -70,6 +70,7 @@ class _MLRunEndPointClient(ABC):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
+        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         # Store the provided info:
         self._model_endpoint_name = model_endpoint_name
@@ -204,6 +205,7 @@ class _V3IOMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
+        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -284,6 +286,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
+        raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
             model_endpoint_name=model_endpoint_name,
@@ -1133,37 +1136,6 @@ register_configure_hook(
     handle_class=MLRunTracer,
 )
 
-
-def get_kafka_stream_profile_name(project: mlrun.projects.MlrunProject) -> str:
-    """
-    Auto-detect the Kafka stream profile name from the project's registered datastore profiles.
-
-    This function searches for registered ``DatastoreProfileKafkaStream`` profiles and returns the name
-    if exactly one is found. If multiple Kafka profiles exist, or none are found, a ValueError is raised.
-
-    :param project: The MLRun project to search for Kafka stream profiles.
-
-    :returns: The name of the detected Kafka stream profile.
-    """
-    kafka_profiles = [
-        p for p in project.list_datastore_profiles()
-        if getattr(p, 'type', None) == 'kafka_stream'
-    ]
-    if len(kafka_profiles) == 1:
-        return kafka_profiles[0].name
-    elif len(kafka_profiles) > 1:
-        profile_names = [p.name for p in kafka_profiles]
-        raise ValueError(
-            f"Multiple Kafka stream profiles found: {profile_names}. "
-            "Please specify stream_profile_name explicitly."
-        )
-    else:
-        raise ValueError(
-            "No Kafka stream profile found. "
-            "Register a DatastoreProfileKafkaStream or pass stream_profile_name explicitly."
-        )
-
-
 # Temporary convenient function to set up the monitoring infrastructure required for the tracer.
 def setup_langchain_monitoring(
     project: str | mlrun.MlrunProject = None,
@@ -1196,12 +1168,12 @@ def setup_langchain_monitoring(
     :param v3io_stream_path: The V3IO stream path for monitoring (for MLRun Enterprise). If None,
         ``<project.name>/model-endpoints/stream-v1`` will be used.
     :param stream_profile_name: The name of the registered ``DatastoreProfileKafkaStream`` to use for Kafka
-        configuration (for MLRun CE). This profile should be registered via ``project.register_datastore_profile()``
-        and contains all Kafka settings including broker, topic, SASL credentials, SSL config, etc. If not provided,
-        the profile name will be retrieved from the project's model monitoring credentials (set via
-        ``project.set_model_monitoring_credentials(stream_profile_name=...)``).
+        configuration (required for MLRun CE). This profile should be registered via
+        ``project.register_datastore_profile()`` and contains all Kafka settings including broker, topic,
+        SASL credentials, SSL config, etc.
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
+    raise: MLRunInvalidArgumentError: If no project is provided and there is no current active project.
     """
     import io
     import time
@@ -1427,9 +1399,11 @@ def handler(context, event):
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
 
     if mlrun.mlconf.is_ce_mode():
-        # If stream_profile_name not provided, try to auto-detect from registered profiles
         if stream_profile_name is None:
-            stream_profile_name = get_kafka_stream_profile_name(project)
+            raise ValueError(
+                "stream_profile_name is required for MLRun CE mode. "
+                "Register a DatastoreProfileKafkaStream and pass its name."
+            )
         client_env_vars = {
             "MLRUN_TRACER_CLIENT_STREAM_PROFILE_NAME": stream_profile_name,
         }
