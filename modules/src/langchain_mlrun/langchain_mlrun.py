@@ -268,7 +268,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
 
     def __init__(
         self,
-        stream_profile_name: str,
+        kafka_stream_profile_name: str,
         model_endpoint_name: str,
         model_endpoint_uid: str,
         serving_function: str | RemoteRuntime,
@@ -278,7 +278,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         """
         Initialize an MLRun model endpoint monitoring client for Kafka.
 
-        :param stream_profile_name: The name of the registered DatastoreProfileKafkaStream to use for Kafka
+        :param kafka_stream_profile_name: The name of the registered DatastoreProfileKafkaStream to use for Kafka
             configuration. This profile should be registered via ``project.register_datastore_profile()`` and
             contains all Kafka settings including broker, topic, SASL credentials, SSL config, etc.
         :param model_endpoint_name: The monitoring endpoint related model name.
@@ -303,8 +303,8 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         # Get project object using resolved project name from parent:
         project_obj = mlrun.get_or_create_project(self._project_name)
 
-        # Fetch the stream profile:
-        stream_profile = project_obj.get_datastore_profile(stream_profile_name)
+        # Fetch the Kafka stream profile:
+        stream_profile = project_obj.get_datastore_profile(kafka_stream_profile_name)
 
         # Get profile attributes and convert to producer config:
         profile_attrs = stream_profile.attributes()
@@ -360,7 +360,7 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
             value=event,  # Will be serialized by the value_serializer
             key=self._model_endpoint_uid,
         )
-        # Flush to ensure the message is actually sent (send() is async and buffers)
+        # Flush to ensure the message is actually sent (send() is async, also includes buffers)
         self._kafka_producer.flush()
 
 
@@ -380,7 +380,7 @@ class MLRunTracerClientSettings(BaseSettings):
     The V3IO stream container.
     """
 
-    stream_profile_name: str | None = None
+    kafka_stream_profile_name: str | None = None
     """
     The name of the registered DatastoreProfileKafkaStream to use for Kafka configuration.
     This profile should be registered via ``project.register_datastore_profile()`` and contains
@@ -423,12 +423,12 @@ class MLRunTracerClientSettings(BaseSettings):
         :returns: The validated settings instance.
         """
         v3io_settings = all([self.v3io_container, self.v3io_stream_path])
-        kafka_settings = self.stream_profile_name is not None
+        kafka_settings = self.kafka_stream_profile_name is not None
 
         if v3io_settings and kafka_settings:
-            raise ValueError("Cannot provide both V3IO and Kafka stream profile settings")
+            raise ValueError("Provide either V3IO settings OR Kafka settings, not both.")
         if not v3io_settings and not kafka_settings:
-            raise ValueError("Must provide either V3IO settings or stream_profile_name")
+            raise ValueError("Must provide either V3IO settings or kafka_stream_profile_name.")
 
         return self
 
@@ -732,7 +732,7 @@ class MLRunTracer(BaseTracer):
         """
         if mlrun.mlconf.is_ce_mode():
             return _KafkaMLRunEndPointClient(
-                stream_profile_name=self._client_settings.stream_profile_name,
+                kafka_stream_profile_name=self._client_settings.kafka_stream_profile_name,
                 model_endpoint_name=self._client_settings.model_endpoint_name,
                 model_endpoint_uid=self._client_settings.model_endpoint_uid,
                 serving_function=self._client_settings.serving_function,
@@ -1144,7 +1144,7 @@ def setup_langchain_monitoring(
     model_endpoint_name: str = "langchain_mlrun_endpoint",
     v3io_container: str = "projects",
     v3io_stream_path: str = None,
-    stream_profile_name: str = None,
+    kafka_stream_profile_name: str = None,
 ) -> dict:
     """
     Create a model endpoint in the given project to be used for LangChain monitoring with MLRun and returns the
@@ -1167,7 +1167,7 @@ def setup_langchain_monitoring(
     :param v3io_container: The V3IO container where the monitoring stream is located (for MLRun Enterprise).
     :param v3io_stream_path: The V3IO stream path for monitoring (for MLRun Enterprise). If None,
         ``<project.name>/model-endpoints/stream-v1`` will be used.
-    :param stream_profile_name: The name of the registered ``DatastoreProfileKafkaStream`` to use for Kafka
+    :param kafka_stream_profile_name: The name of the registered ``DatastoreProfileKafkaStream`` to use for Kafka
         configuration (required for MLRun CE). This profile should be registered via
         ``project.register_datastore_profile()`` and contains all Kafka settings including broker, topic,
         SASL credentials, SSL config, etc.
@@ -1399,13 +1399,13 @@ def handler(context, event):
     v3io_stream_path = v3io_stream_path or f"{project.name}/model-endpoints/stream-v1"
 
     if mlrun.mlconf.is_ce_mode():
-        if stream_profile_name is None:
+        if kafka_stream_profile_name is None:
             raise ValueError(
-                "stream_profile_name is required for MLRun CE mode. "
+                "kafka_stream_profile_name is required for MLRun CE mode. "
                 "Register a DatastoreProfileKafkaStream and pass its name."
             )
         client_env_vars = {
-            "MLRUN_TRACER_CLIENT_STREAM_PROFILE_NAME": stream_profile_name,
+            "MLRUN_TRACER_CLIENT_KAFKA_STREAM_PROFILE_NAME": kafka_stream_profile_name,
         }
     else:
         client_env_vars = {
