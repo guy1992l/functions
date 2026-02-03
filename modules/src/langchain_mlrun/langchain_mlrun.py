@@ -868,7 +868,7 @@ class MLRunTracer(BaseTracer):
         finally:
             # Flush buffered messages after root run completion to ensure delivery
             # without blocking on every single message:
-            if level == 0:
+            if level == 0 and self._mlrun_client:
                 self._mlrun_client.flush()
 
     def _serialize_run(self, run: Run, include_child_runs: bool) -> dict:
