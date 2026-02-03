@@ -146,6 +146,15 @@ class _MLRunEndPointClient(ABC):
         """
         pass
 
+    @abstractmethod
+    def flush(self):
+        """
+        Flush any buffered messages to ensure they are sent to the stream.
+        For streaming backends that buffer messages (like Kafka), this ensures delivery.
+        For backends that send immediately (like V3IO), this may be a no-op.
+        """
+        pass
+
     def _create_event(
         self,
         event_id: str,
@@ -260,6 +269,12 @@ class _V3IOMLRunEndPointClient(_MLRunEndPointClient):
             records=[{"data": orjson.dumps(event).decode('utf-8')}],
         )
 
+    def flush(self):
+        """
+        Flush is a no-op for V3IO as messages are sent immediately via put_records.
+        """
+        pass
+
 
 class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
     """
@@ -354,13 +369,18 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
             response_timestamp=response_timestamp,
         )
 
-        # Push to stream:
+        # Push to stream (async - message is buffered):
         self._kafka_producer.send(
             topic=self._monitoring_topic,
             value=event,  # Will be serialized by the value_serializer
             key=self._model_endpoint_uid,
         )
-        # Flush to ensure the message is actually sent (send() is async, also includes buffers)
+
+    def flush(self):
+        """
+        Flush all buffered messages to ensure they are sent to Kafka.
+        This is a blocking call that waits for all messages to be delivered.
+        """
         self._kafka_producer.flush()
 
 
@@ -428,8 +448,7 @@ class MLRunTracerClientSettings(BaseSettings):
         if v3io_settings and kafka_settings:
             raise ValueError("Provide either V3IO settings OR Kafka settings, not both.")
         if not v3io_settings and not kafka_settings:
-            raise ValueError("Must provide either V3IO settings or kafka_stream_profile_name.")
-
+            raise ValueError("You must provide either a complete V3IO settings or complete Kafka settings. See docs for more information")
         return self
 
 class MLRunTracerMonitorSettings(BaseSettings):
@@ -789,19 +808,38 @@ class MLRunTracer(BaseTracer):
         :param run: LangChain run object to process holding all the nested tree of runs.
         :param level: The nesting level of the run (0 for root runs, incremented for child runs).
         """
-        # Serialize the run:
-        serialized_run = self._serialize_run(
-            run=run,
-            include_child_runs=not (self._settings.monitor.root_run_only or self._settings.monitor.split_runs)
-        )
+        try:
+            # Serialize the run:
+            serialized_run = self._serialize_run(
+                run=run,
+                include_child_runs=not (self._settings.monitor.root_run_only or self._settings.monitor.split_runs)
+            )
 
-        # Check for a user custom run summarizer function:
-        if self._custom_run_summarizer_function:
-            for summarized_run in self._custom_run_summarizer_function(
-                run, self._custom_run_summarizer_settings
-            ):
+            # Check for a user custom run summarizer function:
+            if self._custom_run_summarizer_function:
+                for summarized_run in self._custom_run_summarizer_function(
+                    run, self._custom_run_summarizer_settings
+                ):
+                    if summarized_run:
+                        inputs, outputs = summarized_run
+                        self._send_run_event(
+                            event_id=serialized_run["id"],
+                            inputs=inputs,
+                            outputs=outputs,
+                            start_time=run.start_time,
+                            end_time=run.end_time,
+                        )
+                return
+
+            # Check how to deal with the child runs, monitor them in separate events or as a single event:
+            if self._monitor_settings.split_runs and not self._settings.monitor.root_run_only:
+                # Monitor as separate events:
+                for child_run in run.child_runs:
+                    self._persist_run(run=child_run, level=level + 1)
+                summarized_run = self._summarize_run(serialized_run=serialized_run, include_children=False)
                 if summarized_run:
                     inputs, outputs = summarized_run
+                    inputs["child_level"] = level
                     self._send_run_event(
                         event_id=serialized_run["id"],
                         inputs=inputs,
@@ -809,43 +847,29 @@ class MLRunTracer(BaseTracer):
                         start_time=run.start_time,
                         end_time=run.end_time,
                     )
-            return
+                return
 
-        # Check how to deal with the child runs, monitor them in separate events or as a single event:
-        if self._monitor_settings.split_runs and not self._settings.monitor.root_run_only:
-            # Monitor as separate events:
-            for child_run in run.child_runs:
-                self._persist_run(run=child_run, level=level + 1)
-            summarized_run = self._summarize_run(serialized_run=serialized_run, include_children=False)
-            if summarized_run:
-                inputs, outputs = summarized_run
-                inputs["child_level"] = level
-                self._send_run_event(
-                    event_id=serialized_run["id"],
-                    inputs=inputs,
-                    outputs=outputs,
-                    start_time=run.start_time,
-                    end_time=run.end_time,
-                )
-            return
-
-        # Monitor the root event (include child runs if `root_run_only` is False):
-        summarized_run = self._summarize_run(
-            serialized_run=serialized_run,
-            include_children=not self._monitor_settings.root_run_only
-        )
-        if not summarized_run:
-            return
-        inputs, outputs = summarized_run
-        inputs["child_level"] = level
-        self._send_run_event(
-            event_id=serialized_run["id"],
-            inputs=inputs,
-            outputs=outputs,
-            start_time=run.start_time,
-            end_time=run.end_time,
-        )
-
+            # Monitor the root event (include child runs if `root_run_only` is False):
+            summarized_run = self._summarize_run(
+                serialized_run=serialized_run,
+                include_children=not self._monitor_settings.root_run_only
+            )
+            if not summarized_run:
+                return
+            inputs, outputs = summarized_run
+            inputs["child_level"] = level
+            self._send_run_event(
+                event_id=serialized_run["id"],
+                inputs=inputs,
+                outputs=outputs,
+                start_time=run.start_time,
+                end_time=run.end_time,
+            )
+        finally:
+            # Flush buffered messages after root run completion to ensure delivery
+            # without blocking on every single message:
+            if level == 0:
+                self._mlrun_client.flush()
 
     def _serialize_run(self, run: Run, include_child_runs: bool) -> dict:
         """
