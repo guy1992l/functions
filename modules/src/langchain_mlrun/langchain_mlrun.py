@@ -302,8 +302,8 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         :param serving_function: Serving function name or ``RemoteRuntime`` object.
         :param serving_function_tag: Optional function tag (defaults to 'latest').
         :param project: Project name or ``MlrunProject``. If ``None``, uses the current project.
-        :param kafka_linger_ms: Kafka producer linger.ms setting. If 0 (explicit flush mode), flush is called
-            after each root run. If > 0 (Kafka-managed mode), Kafka controls delivery timing.
+        :param kafka_linger_ms: Kafka producer linger.ms setting controlling message batching. Messages are
+            accumulated for up to this duration before being sent as a batch. Default: 500ms.
         raise: MLRunInvalidArgumentError: If there is no current active project and no `project` argument was provided.
         """
         super().__init__(
@@ -335,20 +335,16 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
         topics = profile_attrs.get("topics", [])
         self._monitoring_topic = topics[0] if topics else get_kafka_topic(project_obj.name)
 
-        # Store linger_ms to determine flush behavior (explicit flush vs Kafka-managed):
-        self._linger_ms = kafka_linger_ms
-
-        # Initialize a Kafka producer with full config from profile:
-        producer_kwargs = {
-            "bootstrap_servers": self._monitoring_broker,
-            "key_serializer": lambda k: k.encode("utf-8") if isinstance(k, str) else k,
-            "value_serializer": lambda v: v if isinstance(v, bytes) else orjson.dumps(v) if isinstance(v, dict) else str(v).encode("utf-8"),
-            **{k: v for k, v in producer_config.items() if k not in ["bootstrap_servers"]}
-        }
-        # Only set linger_ms if > 0 (Kafka-managed mode). If 0, we use explicit flush mode:
-        if kafka_linger_ms > 0:
-            producer_kwargs["linger_ms"] = kafka_linger_ms
-        self._kafka_producer = KafkaProducer(**producer_kwargs)
+        # Initialize a Kafka producer with full config from profile.
+        # Remove bootstrap_servers from producer_config to avoid duplicate argument error:
+        producer_config.pop("bootstrap_servers", None)
+        self._kafka_producer = KafkaProducer(
+            bootstrap_servers=self._monitoring_broker,
+            key_serializer=lambda k: k.encode("utf-8") if isinstance(k, str) else k,
+            value_serializer=lambda v: v if isinstance(v, bytes) else orjson.dumps(v) if isinstance(v, dict) else str(v).encode("utf-8"),
+            linger_ms=kafka_linger_ms,
+            **producer_config,
+        )
 
     def monitor(
         self,
@@ -389,11 +385,9 @@ class _KafkaMLRunEndPointClient(_MLRunEndPointClient):
     def flush(self):
         """
         Flush all buffered messages to ensure they are sent to Kafka.
-        In Kafka-managed mode (linger_ms > 0), this is a no-op as Kafka controls delivery timing.
-        In explicit flush mode (linger_ms == 0), this blocks until all messages are delivered.
+        Blocks until all buffered messages are delivered and acknowledged by the broker.
         """
-        if self._linger_ms == 0:
-            self._kafka_producer.flush()
+        self._kafka_producer.flush()
 
 
 class MLRunTracerClientSettings(BaseSettings):
@@ -419,13 +413,12 @@ class MLRunTracerClientSettings(BaseSettings):
     all Kafka settings including broker, topic, SASL credentials, SSL config, etc.
     """
 
-    kafka_linger_ms: int = 0
+    kafka_linger_ms: int = 500
     """
-    The Kafka producer linger.ms setting controlling message delivery timing.
-    If 0 (default), explicit flush mode: messages are flushed synchronously at the end of each root run,
-    giving you control over delivery timing with guaranteed delivery before the run returns.
-    If > 0, Kafka-managed mode: Kafka controls when to send messages based on this timing (in milliseconds),
-    which may improve throughput but delays delivery. Recommended values: 100-500ms.
+    The Kafka producer linger.ms setting controlling message batching (in milliseconds).
+    Messages are accumulated for up to this duration before being sent as a batch, reducing network
+    overhead. The tracer always flushes at the end of each root run, guaranteeing delivery regardless
+    of this setting. Default: 500ms. Set to 0 to disable batching (each message sent immediately).
     """
 
     model_endpoint_name: str = ...
@@ -888,8 +881,7 @@ class MLRunTracer(BaseTracer):
                 end_time=run.end_time,
             )
         finally:
-            # Flush buffered messages after root run completion to ensure delivery.
-            # The client's flush() handles the linger_ms logic internally:
+            # Flush buffered messages after root run completion to ensure delivery:
             if level == 0 and self._mlrun_client:
                 self._mlrun_client.flush()
 
@@ -1191,7 +1183,7 @@ def setup_langchain_monitoring(
     v3io_container: str = "projects",
     v3io_stream_path: str = None,
     kafka_stream_profile_name: str = None,
-    kafka_linger_ms: int = 0,
+    kafka_linger_ms: int = 500,
 ) -> dict:
     """
     Create a model endpoint in the given project to be used for LangChain monitoring with MLRun and returns the
@@ -1218,9 +1210,9 @@ def setup_langchain_monitoring(
         configuration (required for MLRun CE). This profile should be registered via
         ``project.register_datastore_profile()`` and contains all Kafka settings including broker, topic,
         SASL credentials, SSL config, etc.
-    :param kafka_linger_ms: Kafka producer linger.ms setting (default: 0). If 0 (explicit flush mode), messages
-        are flushed synchronously after each root run, giving you control over delivery timing. If > 0 (Kafka-managed
-        mode), Kafka controls when to send based on this timing (in ms). Recommended values: 100-500ms.
+    :param kafka_linger_ms: Kafka producer linger.ms setting controlling message batching (default: 500ms).
+        Messages are accumulated for up to this duration before being sent as a batch, reducing network overhead.
+        The tracer always flushes at the end of each root run, guaranteeing delivery. Set to 0 to disable batching.
 
     :returns: A dictionary with the necessary environment variables to configure the MLRun tracer client.
     raise: MLRunInvalidArgumentError: If no project is provided and there is no current active project.
