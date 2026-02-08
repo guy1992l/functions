@@ -21,6 +21,4 @@ spec:
       - langchain
       - pydantic-settings
       - kafka-python
-      - orjson
-      - uuid-utils
 version: 0.0.1
